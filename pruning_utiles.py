@@ -764,6 +764,7 @@ def load_pt_weights(
     strict=True,
     map_location="cpu",
 ):
+    
     if dist.is_initialized():
         dist.barrier()
 
@@ -801,15 +802,18 @@ def load_pt_weights(
 
     results = {}
     if low_noise_pt is not None:
+        print("Loading low noise model weights !")
         results["low_noise_model"] = load_one(
             getattr(pipeline, "low_noise_model"), low_noise_pt)
     if high_noise_pt is not None:
+        print("Loading high noise model weights !")
         results["high_noise_model"] = load_one(
             getattr(pipeline, "high_noise_model"), high_noise_pt)
 
     if dist.is_initialized():
         dist.barrier()
 
+    print("Weights loading finish !")
     return results
 
 def save_checkpoint(
