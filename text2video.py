@@ -29,6 +29,80 @@ from .utils.fm_solvers import (
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
 
+def save_checkpoint(
+    pipeline,
+    output_dir,
+    link_files=True,
+    save_low_noise=True,
+    save_high_noise=True,
+):
+    output_dir = os.path.abspath(output_dir)
+    if dist.is_initialized() and getattr(pipeline, "rank", 0) != 0:
+        dist.barrier()
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    def remove_path(path):
+        if os.path.islink(path) or os.path.isfile(path):
+            os.remove(path)
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
+
+    def link_or_copy(src, dst):
+        src = os.path.abspath(src)
+        dst = os.path.abspath(dst)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.exists(dst) or os.path.islink(dst):
+            remove_path(dst)
+        if link_files:
+            os.symlink(src, dst)
+        else:
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+
+    def save_model(model, subfolder):
+        save_dir = os.path.join(output_dir, subfolder)
+        os.makedirs(save_dir, exist_ok=True)
+
+        first_param = next(model.parameters())
+        original_device = first_param.device
+
+        if original_device.type == "cuda":
+            model = model.to("cpu")
+
+        model.save_pretrained(save_dir)
+
+        if original_device.type == "cuda" and (not getattr(pipeline, "init_on_cpu", False)):
+            model = model.to(getattr(pipeline, "device"))
+
+    checkpoint_dir = getattr(pipeline, "checkpoint_dir")
+    config = getattr(pipeline, "config")
+
+    link_or_copy(
+        os.path.join(checkpoint_dir, config.t5_checkpoint),
+        os.path.join(output_dir, config.t5_checkpoint),
+    )
+    link_or_copy(
+        os.path.join(checkpoint_dir, config.vae_checkpoint),
+        os.path.join(output_dir, config.vae_checkpoint),
+    )
+    link_or_copy(
+        os.path.join(checkpoint_dir, config.t5_tokenizer),
+        os.path.join(output_dir, config.t5_tokenizer),
+    )
+
+    if save_low_noise:
+        save_model(getattr(pipeline, "low_noise_model"), config.low_noise_checkpoint)
+    if save_high_noise:
+        save_model(getattr(pipeline, "high_noise_model"), config.high_noise_checkpoint)
+
+    if dist.is_initialized():
+        dist.barrier()
+
+
 class WanT2V:
 
     def __init__(
@@ -167,74 +241,6 @@ class WanT2V:
                 model.to(self.device)
 
         return model
-
-    def save_checkpoint(self,
-                        output_dir,
-                        link_files=True,
-                        save_low_noise=True,
-                        save_high_noise=True):
-        output_dir = os.path.abspath(output_dir)
-        if dist.is_initialized() and self.rank != 0:
-            dist.barrier()
-            return
-
-        os.makedirs(output_dir, exist_ok=True)
-
-        def remove_path(path):
-            if os.path.islink(path) or os.path.isfile(path):
-                os.remove(path)
-            elif os.path.isdir(path):
-                shutil.rmtree(path)
-
-        def link_or_copy(src, dst):
-            src = os.path.abspath(src)
-            dst = os.path.abspath(dst)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            if os.path.exists(dst) or os.path.islink(dst):
-                remove_path(dst)
-            if link_files:
-                os.symlink(src, dst)
-            else:
-                if os.path.isdir(src):
-                    shutil.copytree(src, dst, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(src, dst)
-
-        def save_model(model, subfolder):
-            save_dir = os.path.join(output_dir, subfolder)
-            os.makedirs(save_dir, exist_ok=True)
-
-            first_param = next(model.parameters())
-            original_device = first_param.device
-
-            if original_device.type == "cuda":
-                model = model.to("cpu")
-
-            model.save_pretrained(save_dir)
-
-            if original_device.type == "cuda" and (not self.init_on_cpu):
-                model = model.to(self.device)
-
-        link_or_copy(
-            os.path.join(self.checkpoint_dir, self.config.t5_checkpoint),
-            os.path.join(output_dir, self.config.t5_checkpoint),
-        )
-        link_or_copy(
-            os.path.join(self.checkpoint_dir, self.config.vae_checkpoint),
-            os.path.join(output_dir, self.config.vae_checkpoint),
-        )
-        link_or_copy(
-            os.path.join(self.checkpoint_dir, self.config.t5_tokenizer),
-            os.path.join(output_dir, self.config.t5_tokenizer),
-        )
-
-        if save_low_noise:
-            save_model(self.low_noise_model, self.config.low_noise_checkpoint)
-        if save_high_noise:
-            save_model(self.high_noise_model, self.config.high_noise_checkpoint)
-
-        if dist.is_initialized():
-            dist.barrier()
 
     def _prepare_model_for_timestep(self, t, boundary, offload_model):
         r"""
