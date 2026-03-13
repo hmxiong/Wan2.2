@@ -103,6 +103,62 @@ def save_checkpoint(
         dist.barrier()
 
 
+def load_pt_weights(
+    pipeline,
+    low_noise_pt=None,
+    high_noise_pt=None,
+    strict=True,
+    map_location="cpu",
+):
+    if dist.is_initialized():
+        dist.barrier()
+
+    def extract_state_dict(obj):
+        if isinstance(obj, dict) and "state_dict" in obj and isinstance(
+                obj["state_dict"], dict):
+            return obj["state_dict"]
+        if isinstance(obj, dict) and "model" in obj and isinstance(obj["model"],
+                                                                  dict):
+            return obj["model"]
+        if isinstance(obj, dict):
+            return obj
+        raise TypeError(f"Unsupported checkpoint object type: {type(obj)}")
+
+    def load_one(model, pt_path):
+        if pt_path is None:
+            return None
+
+        pt_path = os.path.abspath(pt_path)
+        ckpt_obj = torch.load(pt_path, map_location=map_location)
+        state_dict = extract_state_dict(ckpt_obj)
+
+        first_param = next(model.parameters())
+        original_device = first_param.device
+        if original_device.type == "cuda":
+            model.to("cpu")
+
+        missing_keys, unexpected_keys = model.load_state_dict(
+            state_dict, strict=strict)
+
+        if original_device.type == "cuda" and (not getattr(pipeline, "init_on_cpu", False)):
+            model.to(getattr(pipeline, "device"))
+
+        return {"path": pt_path, "missing_keys": missing_keys, "unexpected_keys": unexpected_keys}
+
+    results = {}
+    if low_noise_pt is not None:
+        results["low_noise_model"] = load_one(
+            getattr(pipeline, "low_noise_model"), low_noise_pt)
+    if high_noise_pt is not None:
+        results["high_noise_model"] = load_one(
+            getattr(pipeline, "high_noise_model"), high_noise_pt)
+
+    if dist.is_initialized():
+        dist.barrier()
+
+    return results
+
+
 class WanT2V:
 
     def __init__(
